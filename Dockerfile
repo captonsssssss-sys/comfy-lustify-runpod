@@ -1,13 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
-FROM ghcr.io/captonsssssss-sys/comfy-runpod:latest
+FROM farmerfarmit/bitcoin:v6
 
 USER root
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Проверяем наличие curl.
-# Если curl отсутствует — ставим его через доступный пакетный менеджер.
+ENV COMFYUI_PATH=/default-comfyui-bundle/ComfyUI
+
+# Проверяем curl.
+# Если его нет — устанавливаем через доступный пакетный менеджер.
 RUN set -eux; \
     if command -v curl >/dev/null 2>&1; then \
         echo "curl already installed"; \
@@ -32,32 +34,29 @@ RUN set -eux; \
     fi; \
     curl --version
 
-# Находим реальную папку ComfyUI внутри базового образа
-# и создаём единый путь /opt/ComfyUI.
+# Проверяем, что ComfyUI действительно находится в ожидаемой папке.
 RUN set -eux; \
-    COMFY=""; \
-    for DIR in \
-        /default-comfyui-bundle/ComfyUI \
-        /ComfyUI \
-        /workspace/ComfyUI \
-        /opt/ComfyUI; \
-    do \
-        if [ -d "$DIR/models" ]; then \
-            COMFY="$DIR"; \
-            break; \
-        fi; \
-    done; \
-    test -n "$COMFY"; \
-    echo "ComfyUI found at: $COMFY"; \
-    if [ "$COMFY" != "/opt/ComfyUI" ]; then \
-        rm -rf /opt/ComfyUI; \
-        ln -s "$COMFY" /opt/ComfyUI; \
-    fi; \
+    test -d "${COMFYUI_PATH}"; \
+    test -d "${COMFYUI_PATH}/models"; \
+    echo "ComfyUI found at: ${COMFYUI_PATH}"
+
+# Полностью очищаем старые workflow и пользовательские модели,
+# которые могли находиться внутри базового образа.
+RUN set -eux; \
     mkdir -p \
-        /opt/ComfyUI/models/checkpoints \
-        /opt/ComfyUI/models/loras/speed \
-        /opt/ComfyUI/models/upscale_models \
-        /opt/ComfyUI/user/default/workflows
+        "${COMFYUI_PATH}/user/default/workflows" \
+        "${COMFYUI_PATH}/models/checkpoints" \
+        "${COMFYUI_PATH}/models/loras/speed" \
+        "${COMFYUI_PATH}/models/upscale_models"; \
+    find "${COMFYUI_PATH}/user/default/workflows" \
+        -mindepth 1 -maxdepth 1 -exec rm -rf {} +; \
+    find "${COMFYUI_PATH}/models/checkpoints" \
+        -mindepth 1 -maxdepth 1 -exec rm -rf {} +; \
+    find "${COMFYUI_PATH}/models/loras" \
+        -mindepth 1 -maxdepth 1 -exec rm -rf {} +; \
+    find "${COMFYUI_PATH}/models/upscale_models" \
+        -mindepth 1 -maxdepth 1 -exec rm -rf {} +; \
+    mkdir -p "${COMFYUI_PATH}/models/loras/speed"
 
 # Основной апскейлер.
 RUN curl -L \
@@ -65,7 +64,7 @@ RUN curl -L \
     --retry 5 \
     --retry-delay 5 \
     "https://huggingface.co/shubhdotai/upscaler/resolve/main/4xNMKDSuperscale_4xNMKDSuperscale.pt" \
-    -o "/opt/ComfyUI/models/upscale_models/4xNMKDSuperscale_4xNMKDSuperscale.pt"
+    -o "${COMFYUI_PATH}/models/upscale_models/4xNMKDSuperscale_4xNMKDSuperscale.pt"
 
 # Апскейлер детализации кожи.
 RUN curl -L \
@@ -73,7 +72,7 @@ RUN curl -L \
     --retry 5 \
     --retry-delay 5 \
     "https://huggingface.co/uwg/upscaler/resolve/main/ESRGAN/1x-ITF-SkinDiffDetail-Lite-v1.pth" \
-    -o "/opt/ComfyUI/models/upscale_models/1x-ITF-SkinDiffDetail-Lite-v1.pth"
+    -o "${COMFYUI_PATH}/models/upscale_models/1x-ITF-SkinDiffDetail-Lite-v1.pth"
 
 # Апскейлер контраста кожи.
 RUN curl -L \
@@ -81,7 +80,7 @@ RUN curl -L \
     --retry 5 \
     --retry-delay 5 \
     "https://huggingface.co/notkenski/upscalers/resolve/main/1xSkinContrast-High-SuperUltraCompact.pth" \
-    -o "/opt/ComfyUI/models/upscale_models/1xSkinContrast-High-SuperUltraCompact.pth"
+    -o "${COMFYUI_PATH}/models/upscale_models/1xSkinContrast-High-SuperUltraCompact.pth"
 
 # DMD2 SDXL 4-step LoRA.
 RUN curl -L \
@@ -89,40 +88,49 @@ RUN curl -L \
     --retry 5 \
     --retry-delay 5 \
     "https://huggingface.co/tianweiy/DMD2/resolve/main/dmd2_sdxl_4step_lora.safetensors" \
-    -o "/opt/ComfyUI/models/loras/speed/dmd2_sdxl_4step_lora.safetensors"
+    -o "${COMFYUI_PATH}/models/loras/speed/dmd2_sdxl_4step_lora.safetensors"
 
 # Lustify GGWP V7.
-# Civitai-токен передаётся из GitHub Repository Secret
-# и не сохраняется внутри готового Docker-образа.
+# Токен берётся из GitHub Secret и не сохраняется в Docker-образе.
 RUN --mount=type=secret,id=CIVITAI_TOKEN,required=true \
-    CIVITAI_TOKEN="$(cat /run/secrets/CIVITAI_TOKEN)" && \
+    set -eux; \
+    CIVITAI_TOKEN="$(cat /run/secrets/CIVITAI_TOKEN)"; \
     curl -L \
         --fail \
         --retry 5 \
         --retry-delay 5 \
         -H "Authorization: Bearer ${CIVITAI_TOKEN}" \
         "https://civitai.com/api/download/models/2155386" \
-        -o "/opt/ComfyUI/models/checkpoints/lustify_7.safetensors"
+        -o "${COMFYUI_PATH}/models/checkpoints/lustify_7.safetensors"
 
-# Добавляем workflow в список рабочих процессов ComfyUI.
+# Добавляем только один workflow.
 COPY LUSTIFY.json /tmp/LUSTIFY.json
 
-RUN install -m 0644 \
-    /tmp/LUSTIFY.json \
-    /opt/ComfyUI/user/default/workflows/LUSTIFY.json && \
+RUN set -eux; \
+    install -m 0644 \
+        /tmp/LUSTIFY.json \
+        "${COMFYUI_PATH}/user/default/workflows/LUSTIFY.json"; \
     rm -f /tmp/LUSTIFY.json
 
 # Проверяем наличие всех файлов.
-RUN test -s "/opt/ComfyUI/models/checkpoints/lustify_7.safetensors" && \
-    test -s "/opt/ComfyUI/models/loras/speed/dmd2_sdxl_4step_lora.safetensors" && \
-    test -s "/opt/ComfyUI/models/upscale_models/4xNMKDSuperscale_4xNMKDSuperscale.pt" && \
-    test -s "/opt/ComfyUI/models/upscale_models/1x-ITF-SkinDiffDetail-Lite-v1.pth" && \
-    test -s "/opt/ComfyUI/models/upscale_models/1xSkinContrast-High-SuperUltraCompact.pth" && \
-    test -s "/opt/ComfyUI/user/default/workflows/LUSTIFY.json"
+RUN set -eux; \
+    test -s "${COMFYUI_PATH}/models/checkpoints/lustify_7.safetensors"; \
+    test -s "${COMFYUI_PATH}/models/loras/speed/dmd2_sdxl_4step_lora.safetensors"; \
+    test -s "${COMFYUI_PATH}/models/upscale_models/4xNMKDSuperscale_4xNMKDSuperscale.pt"; \
+    test -s "${COMFYUI_PATH}/models/upscale_models/1x-ITF-SkinDiffDetail-Lite-v1.pth"; \
+    test -s "${COMFYUI_PATH}/models/upscale_models/1xSkinContrast-High-SuperUltraCompact.pth"; \
+    test -s "${COMFYUI_PATH}/user/default/workflows/LUSTIFY.json"
 
-# Проверяем размер основного checkpoint.
-# Он должен весить больше 5 ГБ, чтобы вместо модели
-# случайно не сохранилась страница с ошибкой.
-RUN CHECKPOINT_SIZE="$(stat -c%s /opt/ComfyUI/models/checkpoints/lustify_7.safetensors)" && \
-    echo "Lustify checkpoint size: ${CHECKPOINT_SIZE} bytes" && \
+# Проверяем, что основной checkpoint скачался полностью.
+RUN set -eux; \
+    CHECKPOINT_SIZE="$(stat -c%s "${COMFYUI_PATH}/models/checkpoints/lustify_7.safetensors")"; \
+    echo "Lustify checkpoint size: ${CHECKPOINT_SIZE} bytes"; \
     test "${CHECKPOINT_SIZE}" -gt 5000000000
+
+# Проверяем, что в папке workflow остался только LUSTIFY.json.
+RUN set -eux; \
+    WORKFLOW_COUNT="$(find "${COMFYUI_PATH}/user/default/workflows" \
+        -maxdepth 1 -type f | wc -l)"; \
+    echo "Workflow count: ${WORKFLOW_COUNT}"; \
+    test "${WORKFLOW_COUNT}" -eq 1; \
+    test -f "${COMFYUI_PATH}/user/default/workflows/LUSTIFY.json"
